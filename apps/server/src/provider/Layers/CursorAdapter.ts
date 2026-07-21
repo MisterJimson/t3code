@@ -18,9 +18,11 @@ import {
   ProviderInstanceId,
   RuntimeRequestId,
   type RuntimeMode,
+  type ServerProviderSkill,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -48,6 +50,7 @@ import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  type ProviderDriverError,
 } from "../Errors.ts";
 import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
@@ -84,6 +87,40 @@ const CURSOR_RESUME_VERSION = 1 as const;
 const ACP_PLAN_MODE_ALIASES = ["plan", "architect"];
 const ACP_IMPLEMENT_MODE_ALIASES = ["code", "agent", "default", "chat", "implement"];
 const ACP_APPROVAL_MODE_ALIASES = ["ask"];
+const ENVIRONMENT_VARIABLE_STYLE_TOKEN = /^[A-Z][A-Z0-9_]*$/;
+
+function submittedSkillTokens(input: string) {
+  return collectComposerInlineTokens(input, { includeTrailingSkillToken: true }).filter(
+    (token) => token.type === "skill",
+  );
+}
+
+function potentialCursorSkillTokens(input: string) {
+  return submittedSkillTokens(input).filter(
+    (token) => !ENVIRONMENT_VARIABLE_STYLE_TOKEN.test(token.value),
+  );
+}
+
+export function rewriteCursorSkillReferences(
+  input: string,
+  skills: ReadonlyArray<ServerProviderSkill>,
+): string {
+  const enabledSkillNames = new Set(
+    skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+  );
+  const replacements = submittedSkillTokens(input).filter((token) =>
+    enabledSkillNames.has(token.value),
+  );
+  if (replacements.length === 0) {
+    return input;
+  }
+
+  let rewritten = input;
+  for (const token of replacements.toReversed()) {
+    rewritten = `${rewritten.slice(0, token.start)}/${token.value}${rewritten.slice(token.end)}`;
+  }
+  return rewritten;
+}
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -99,6 +136,9 @@ export interface CursorAdapterLiveOptions {
    * Defaults to the legacy built-in instance id (`cursor`).
    */
   readonly instanceId?: ProviderInstanceId;
+  readonly listSkills?: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<ServerProviderSkill>, ProviderDriverError>;
   /**
    * Optional per-session settings resolver. When provided the adapter yields
    * this effect at the start of every session and uses the result instead of
@@ -961,8 +1001,24 @@ export function makeCursorAdapter(
           }
 
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          if (input.input?.trim()) {
-            promptParts.push({ type: "text", text: input.input.trim() });
+          const rawText = input.input?.trim();
+          const text =
+            rawText && options?.listSkills && potentialCursorSkillTokens(rawText).length > 0
+              ? yield* options.listSkills(ctx.session.cwd ?? "").pipe(
+                  Effect.map((skills) => rewriteCursorSkillReferences(rawText, skills)),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "skills/list",
+                        detail: "Failed to resolve Cursor skill references for this prompt.",
+                        cause,
+                      }),
+                  ),
+                )
+              : rawText;
+          if (text) {
+            promptParts.push({ type: "text", text });
           }
           if (input.attachments && input.attachments.length > 0) {
             for (const attachment of input.attachments) {

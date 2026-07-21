@@ -31,6 +31,7 @@ import {
   checkCursorProviderStatus,
   enrichCursorSnapshot,
 } from "../Layers/CursorProvider.ts";
+import { listCursorSkills } from "../Layers/CursorSkillDiscovery.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -125,10 +126,24 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         env: processEnv,
       });
 
+      const listSkills = Effect.fn("CursorDriver.listSkills")(function* (cwd: string) {
+        if (!effectiveConfig.enabled) {
+          return [];
+        }
+
+        return yield* listCursorSkills({
+          cwd,
+          ...(processEnv.HOME ? { homeDirectory: processEnv.HOME } : {}),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
+      });
       const adapter = yield* makeCursorAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
+        listSkills,
       });
       const textGeneration = yield* makeCursorTextGeneration(effectiveConfig, processEnv);
 
@@ -184,6 +199,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
+        listSkills,
       } satisfies ProviderInstance;
     }),
 };

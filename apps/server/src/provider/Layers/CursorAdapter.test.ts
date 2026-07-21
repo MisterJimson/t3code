@@ -28,8 +28,39 @@ import {
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
-import { makeCursorAdapter } from "./CursorAdapter.ts";
+import { makeCursorAdapter, rewriteCursorSkillReferences } from "./CursorAdapter.ts";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
+
+it("rewrites only exact enabled Cursor skill references", () => {
+  const skills = [
+    {
+      name: "review",
+      path: "/skills/review/SKILL.md",
+      scope: "project",
+      enabled: true,
+    },
+    {
+      name: "engineering:triage",
+      path: "/skills/engineering-triage/SKILL.md",
+      scope: "plugin:engineering",
+      enabled: true,
+    },
+    {
+      name: "disabled",
+      path: "/skills/disabled/SKILL.md",
+      scope: "project",
+      enabled: false,
+    },
+  ];
+
+  assert.equal(
+    rewriteCursorSkillReferences(
+      "Use $review and keep $PATH plus $disabled then run $engineering:triage",
+      skills,
+    ),
+    "Use /review and keep $PATH plus $disabled then run /engineering:triage",
+  );
+});
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
 class CursorAdapter extends Context.Service<CursorAdapter, CursorAdapterShape>()(
