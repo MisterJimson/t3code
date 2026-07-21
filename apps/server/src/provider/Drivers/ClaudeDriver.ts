@@ -33,6 +33,7 @@ import {
   makePendingClaudeProvider,
   probeClaudeCapabilities,
 } from "../Layers/ClaudeProvider.ts";
+import { listClaudeSkills } from "../Layers/ClaudeSkillDiscovery.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -53,7 +54,11 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import {
+  makeClaudeCapabilitiesCacheKey,
+  makeClaudeContinuationGroupKey,
+  resolveClaudeHomePath,
+} from "./ClaudeHome.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -118,6 +123,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { cwd } = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
@@ -141,9 +147,22 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
+      const resolvedClaudeHome = yield* resolveClaudeHomePath(effectiveConfig);
+      const configDirectory = effectiveConfig.homePath.trim()
+        ? resolvedClaudeHome
+        : path.join(resolvedClaudeHome, ".claude");
+      const listSkills: ProviderInstance["listSkills"] = (skillCwd) =>
+        effectiveConfig.enabled
+          ? listClaudeSkills({ cwd: skillCwd, configDirectory }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+            )
+          : Effect.succeed([]);
+
       const adapterOptions = {
         instanceId,
         environment: processEnv,
+        listSkills,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
@@ -211,6 +230,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
+        listSkills,
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

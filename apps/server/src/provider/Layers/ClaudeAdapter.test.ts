@@ -37,8 +37,39 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import {
+  injectClaudeSkillReferences,
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+
+describe("injectClaudeSkillReferences", () => {
+  it("adds exact enabled skill paths while preserving the user request", () => {
+    assert.equal(
+      injectClaudeSkillReferences("Please $review this", [
+        { name: "review", path: "/repo/.agents/skills/review/SKILL.md", enabled: true },
+        { name: "hidden", path: "/repo/.agents/skills/hidden/SKILL.md", enabled: false },
+      ]),
+      [
+        "The user explicitly invoked the following skills. Before answering, read each referenced SKILL.md file and follow its instructions:",
+        "- review: /repo/.agents/skills/review/SKILL.md",
+        "",
+        "User request:",
+        "Please $review this",
+      ].join("\n"),
+    );
+  });
+
+  it("leaves prompts without a matching skill unchanged", () => {
+    assert.equal(
+      injectClaudeSkillReferences("Read $HOME", [
+        { name: "review", path: "/repo/.agents/skills/review/SKILL.md", enabled: true },
+      ]),
+      "Read $HOME",
+    );
+  });
+});
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(

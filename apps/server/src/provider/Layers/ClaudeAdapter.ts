@@ -36,6 +36,7 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ServerProviderSkill,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
@@ -46,6 +47,7 @@ import {
   TurnId,
   type UserInputQuestion,
 } from "@t3tools/contracts";
+import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
 import {
   applyClaudePromptEffortPrefix,
   getModelSelectionBooleanOptionValue,
@@ -86,6 +88,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
   type ProviderAdapterError,
+  type ProviderDriverError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -221,6 +224,9 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly listSkills?: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<ServerProviderSkill>, ProviderDriverError>;
 }
 
 function isUuid(value: string): boolean {
@@ -906,6 +912,30 @@ function buildPromptText(
 
   const promptEffort = resolvePromptInjectedEffort(caps, rawEffort);
   return applyClaudePromptEffortPrefix(input.input?.trim() ?? "", promptEffort);
+}
+
+export function injectClaudeSkillReferences(
+  input: string,
+  skills: ReadonlyArray<ServerProviderSkill>,
+): string {
+  const requestedNames = new Set(
+    collectComposerInlineTokens(input, { includeTrailingSkillToken: true })
+      .filter((token) => token.type === "skill")
+      .map((token) => token.value.toLowerCase()),
+  );
+  const requestedSkills = skills.filter(
+    (skill) => skill.enabled && requestedNames.has(skill.name.toLowerCase()),
+  );
+  if (requestedSkills.length === 0) return input;
+
+  const references = requestedSkills.map((skill) => `- ${skill.name}: ${skill.path}`).join("\n");
+  return [
+    "The user explicitly invoked the following skills. Before answering, read each referenced SKILL.md file and follow its instructions:",
+    references,
+    "",
+    "User request:",
+    input,
+  ].join("\n");
 }
 
 function buildUserMessage(input: {
@@ -3726,11 +3756,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const message = yield* buildUserMessageEffect(input, {
-      fileSystem,
-      attachmentsDir: serverConfig.attachmentsDir,
-      boundInstanceId,
-    });
+    const rawInput = input.input;
+    const skillResolvedInput =
+      options?.listSkills && rawInput
+        ? yield* options.listSkills(context.session.cwd ?? serverConfig.cwd).pipe(
+            Effect.map((skills) => injectClaudeSkillReferences(rawInput, skills)),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "skills/list",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          )
+        : input.input;
+    const message = yield* buildUserMessageEffect(
+      { ...input, input: skillResolvedInput },
+      {
+        fileSystem,
+        attachmentsDir: serverConfig.attachmentsDir,
+        boundInstanceId,
+      },
+    );
 
     yield* Queue.offer(context.promptQueue, {
       type: "message",
