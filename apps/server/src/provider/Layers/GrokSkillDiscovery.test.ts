@@ -10,7 +10,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { listGrokSkills, parseGrokInspectSkills } from "./GrokSkillDiscovery.ts";
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const inspectPayload = encodeJson({
   ignoredTopLevelField: true,
