@@ -40,7 +40,6 @@ export const SourceControlRepositoryCloneUrls = Schema.Struct({
   nameWithOwner: TrimmedNonEmptyString,
   url: TrimmedNonEmptyString,
   sshUrl: TrimmedNonEmptyString,
-  preferredProtocol: Schema.optional(Schema.Literals(["ssh", "https"])),
 });
 export type SourceControlRepositoryCloneUrls = typeof SourceControlRepositoryCloneUrls.Type;
 
@@ -55,7 +54,6 @@ export const SourceControlRepositoryInfo = Schema.Struct({
   nameWithOwner: TrimmedNonEmptyString,
   url: TrimmedNonEmptyString,
   sshUrl: TrimmedNonEmptyString,
-  preferredProtocol: Schema.optional(Schema.Literals(["ssh", "https"])),
 });
 export type SourceControlRepositoryInfo = typeof SourceControlRepositoryInfo.Type;
 

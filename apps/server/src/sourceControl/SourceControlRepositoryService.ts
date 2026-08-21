@@ -61,7 +61,6 @@ function toRepositoryInfo(
     nameWithOwner: urls.nameWithOwner,
     url: urls.url,
     sshUrl: urls.sshUrl,
-    ...(urls.preferredProtocol ? { preferredProtocol: urls.preferredProtocol } : {}),
   };
 }
 
@@ -72,9 +71,8 @@ function selectRemoteUrl(
   switch (protocol ?? "auto") {
     case "https":
       return urls.url;
-    case "auto":
-      return urls.preferredProtocol === "ssh" ? urls.sshUrl : urls.url;
     case "ssh":
+    case "auto":
       return urls.sshUrl;
   }
 }
