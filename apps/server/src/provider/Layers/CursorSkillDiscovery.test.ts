@@ -101,6 +101,20 @@ it.layer(NodeServices.layer)("listCursorSkills", (it) => {
           frontmatter: "name: engineering:review\ndescription: Review changes",
         });
         yield* writeSkill({
+          root: path.join(
+            home,
+            ".cursor",
+            "plugins",
+            "cache",
+            "terminal-ai-plugins",
+            "engineering",
+            "version-a",
+            "skills",
+          ),
+          directoryName: "poteto-mode",
+          frontmatter: "name: Poteto Mode\ndescription: Work in Poteto's style",
+        });
+        yield* writeSkill({
           root: path.join(home, ".cursor", "skills-cursor"),
           directoryName: "browser",
           frontmatter: "name: browser\ndescription: Browse the web",
@@ -115,10 +129,23 @@ it.layer(NodeServices.layer)("listCursorSkills", (it) => {
         const skills = yield* listCursorSkills({ cwd: repo, homeDirectory: home });
 
         assert.deepStrictEqual(
-          skills.map((skill) => ({ name: skill.name, scope: skill.scope })),
+          skills.map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName,
+            scope: skill.scope,
+          })),
           [
-            { name: "engineering:review", scope: "plugin:engineering" },
-            { name: "browser", scope: "bundled" },
+            {
+              name: "poteto-mode",
+              displayName: "Poteto Mode",
+              scope: "plugin:engineering",
+            },
+            {
+              name: "engineering:review",
+              displayName: undefined,
+              scope: "plugin:engineering",
+            },
+            { name: "browser", displayName: undefined, scope: "bundled" },
           ],
         );
       }),

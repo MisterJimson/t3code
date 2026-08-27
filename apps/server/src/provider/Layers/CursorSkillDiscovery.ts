@@ -14,6 +14,7 @@ const CursorSkillFrontmatter = Schema.Struct({
 });
 
 const decodeCursorSkillFrontmatter = Schema.decodeUnknownEffect(fromYaml(CursorSkillFrontmatter));
+const CURSOR_SKILL_INVOCATION_NAME = /^[a-zA-Z][a-zA-Z0-9:_-]*$/;
 
 interface CursorSkillRoot {
   readonly directory: string;
@@ -117,16 +118,25 @@ const readSkill = Effect.fn("CursorSkillDiscovery.readSkill")(function* (
     return undefined;
   }
 
-  const name = nonEmpty(parsed.name) ?? nonEmpty(entryName);
+  const frontmatterName = nonEmpty(parsed.name);
+  const directoryName = nonEmpty(entryName);
+  const name =
+    frontmatterName && CURSOR_SKILL_INVOCATION_NAME.test(frontmatterName)
+      ? frontmatterName
+      : directoryName && CURSOR_SKILL_INVOCATION_NAME.test(directoryName)
+        ? directoryName
+        : undefined;
   if (!name) {
     return undefined;
   }
   const description = nonEmpty(parsed.description);
+  const displayName = frontmatterName && frontmatterName !== name ? frontmatterName : undefined;
   return {
     name,
     path: skillPath,
     scope: root.scope,
     enabled: true,
+    ...(displayName ? { displayName } : {}),
     ...(description ? { description } : {}),
   } satisfies ServerProviderSkill;
 });
