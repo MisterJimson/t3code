@@ -9,20 +9,16 @@ import {
   type EnvironmentThreadSearchMatch,
 } from "@t3tools/client-runtime/state/thread-search";
 import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
-import {
-  type EnvironmentId,
-  type OrchestrationThread,
-  type ProjectContentMatch,
-  type ProjectEntryKind,
-  type ProviderInstanceId,
-  ServerProviderSkillsUnsupportedError,
-  type ThreadId,
-  type VcsListRefsResult,
-  type VcsRef,
+import type {
+  EnvironmentId,
+  OrchestrationThread,
+  ProjectContentMatch,
+  ProjectEntryKind,
+  VcsListRefsResult,
+  VcsRef,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -31,7 +27,6 @@ import { orchestrationEnvironment } from "./orchestration";
 import { isPaginatedBranchesNextPagePending } from "./paginatedBranches";
 import { projectContentSearch, projectEnvironment } from "./projects";
 import { useEnvironmentQuery } from "./query";
-import { useEnvironmentThread } from "./threads";
 import { vcsEnvironment } from "./vcs";
 
 const PROJECT_PATH_SEARCH_DEBOUNCE_MS = 120;
@@ -43,7 +38,6 @@ const VCS_REF_LIST_LIMIT = 100;
 const EMPTY_REFS: ReadonlyArray<VcsRef> = [];
 const EMPTY_CONTENT_MATCHES: ReadonlyArray<ProjectContentMatch> = [];
 const INITIAL_BRANCH_CURSORS = [undefined] as const;
-const isProviderSkillsUnsupportedError = Schema.is(ServerProviderSkillsUnsupportedError);
 const EMPTY_THREAD_SEARCH_MATCHES: ReadonlyArray<EnvironmentThreadSearchMatch> = Object.freeze([]);
 const EMPTY_THREAD_SEARCH_ATOM = Atom.make({
   matches: EMPTY_THREAD_SEARCH_MATCHES,
@@ -105,35 +99,6 @@ export function useThreadSearch(
     matches: isDebouncing ? EMPTY_THREAD_SEARCH_MATCHES : result.matches,
     isPending: canSearch && (isDebouncing || result.isLoading),
   };
-}
-
-export function useThreadDetail(
-  environmentId: EnvironmentId | null,
-  threadId: ThreadId | null,
-): ThreadDetailView {
-  const state = useEnvironmentThread(environmentId, threadId);
-  return {
-    data: Option.getOrNull(state.data),
-    error: Option.getOrNull(state.error),
-    isPending: state.status === "synchronizing",
-    isDeleted: state.status === "deleted",
-  };
-}
-
-export function useBranches(target: VcsRefTarget) {
-  const query = target.query?.trim() ?? "";
-  return useEnvironmentQuery(
-    target.environmentId !== null && target.cwd !== null
-      ? vcsEnvironment.listRefs({
-          environmentId: target.environmentId,
-          input: {
-            cwd: target.cwd,
-            ...(query.length > 0 ? { query } : {}),
-            limit: VCS_REF_LIST_LIMIT,
-          },
-        })
-      : null,
-  );
 }
 
 export function usePaginatedBranches(target: VcsRefTarget) {
@@ -299,29 +264,6 @@ export function useProjectPathSearch(
       !areProjectPathSearchTargetsEqual(normalizedTarget, debouncedTarget) || result.isPending,
     searchedQuery: debouncedTarget.query ?? "",
     refresh: result.refresh,
-  };
-}
-
-export function useProviderSkills(target: {
-  readonly environmentId: EnvironmentId | null;
-  readonly instanceId: ProviderInstanceId | null;
-  readonly cwd: string | null;
-  readonly enabled: boolean;
-}) {
-  const result = useEnvironmentQuery(
-    target.enabled &&
-      target.environmentId !== null &&
-      target.instanceId !== null &&
-      target.cwd !== null
-      ? projectEnvironment.listProviderSkills({
-          environmentId: target.environmentId,
-          input: { instanceId: target.instanceId, cwd: target.cwd },
-        })
-      : null,
-  );
-  return {
-    ...result,
-    isUnsupported: result.failure !== null && isProviderSkillsUnsupportedError(result.failure),
   };
 }
 

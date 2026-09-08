@@ -9,11 +9,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
-  type ServerProviderSkill,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -42,13 +40,13 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
-  type ProviderDriverError,
 } from "../Errors.ts";
 import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
@@ -108,54 +106,10 @@ export interface GrokAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
-  readonly listSkills?: (
-    cwd: string,
-  ) => Effect.Effect<ReadonlyArray<ServerProviderSkill>, ProviderDriverError>;
   /** Override the conservative ACP turn liveness timeout in focused tests. */
   readonly turnInactivityTimeoutMs?: number;
   /** Override the longer active-tool liveness timeout in focused tests. */
   readonly activeToolInactivityTimeoutMs?: number;
-}
-
-// Provider requests contain only flattened prompt text, so an inserted skill
-// chip cannot be distinguished from manually typed shell syntax here. Grok's
-// normal skill names are lowercase or qualified; reserve conventional
-// all-uppercase identifiers for environment variables so `$PATH` does not run
-// (or fail on) `grok inspect`. An all-uppercase skill can still be rewritten
-// when discovery is triggered by another normal skill token in the prompt.
-const ENVIRONMENT_VARIABLE_STYLE_TOKEN = /^[A-Z][A-Z0-9_]*$/;
-
-function submittedSkillTokens(input: string) {
-  return collectComposerInlineTokens(input, { includeTrailingSkillToken: true }).filter(
-    (token) => token.type === "skill",
-  );
-}
-
-function potentialGrokSkillTokens(input: string) {
-  return submittedSkillTokens(input).filter(
-    (token) => !ENVIRONMENT_VARIABLE_STYLE_TOKEN.test(token.value),
-  );
-}
-
-export function rewriteGrokSkillReferences(
-  input: string,
-  skills: ReadonlyArray<ServerProviderSkill>,
-): string {
-  const enabledSkillNames = new Set(
-    skills.filter((skill) => skill.enabled).map((skill) => skill.name),
-  );
-  const replacements = submittedSkillTokens(input).filter((token) =>
-    enabledSkillNames.has(token.value),
-  );
-  if (replacements.length === 0) {
-    return input;
-  }
-
-  let rewritten = input;
-  for (const token of replacements.toReversed()) {
-    rewritten = `${rewritten.slice(0, token.start)}/${token.value}${rewritten.slice(token.end)}`;
-  }
-  return rewritten;
 }
 
 interface PendingApproval {
@@ -198,8 +152,15 @@ interface GrokSessionContext {
   interruptedTurnIds: Set<TurnId>;
   /** Number of sendTurn prompts currently in flight or being prepared.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
+   * cancels the in-flight prompt and continues the same turn. Only the last
+   * remaining prompt settles the turn. */
   promptsInFlight: number;
+  /** Monotonic id assigned to each sendTurn. Steers discard older epochs. */
+  promptEpoch: number;
+  /** Prompt epochs below this value must not start an ACP session/prompt. */
+  discardBeforeEpoch: number;
+  /** Serializes cancel-then-prompt so a steer cannot miss or hit the wrong RPC. */
+  readonly promptLifecycle: Semaphore.Semaphore;
   readonly livenessSignals: Queue.Queue<GrokTurnLivenessSignal>;
   livenessTurnId: TurnId | undefined;
   lastTurnActivityAtNanos: bigint | undefined;
@@ -1326,6 +1287,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
+            promptEpoch: 0,
+            discardBeforeEpoch: 0,
+            promptLifecycle: yield* Semaphore.make(1),
             livenessSignals: yield* Queue.sliding<GrokTurnLivenessSignal>(1),
             livenessTurnId: undefined,
             lastTurnActivityAtNanos: undefined,
@@ -1513,15 +1477,18 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
-            // A sendTurn while a prompt is in flight is a steer: the agent
-            // folds the new prompt into the ongoing work, so the active turn
-            // id is reused instead of opening a new turn.
+            // A sendTurn while a prompt is in flight is a steer: reuse the
+            // active turn and cancel the in-flight ACP prompt so Grok takes
+            // the new instruction immediately, matching Claude/Codex, instead
+            // of waiting behind serialized session/prompt.
             const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
             const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
             // Count this prompt immediately so a superseded in-flight prompt
             // resolving from here on does not settle the turn; decremented on
             // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
+            ctx.promptEpoch += 1;
+            const promptEpoch = ctx.promptEpoch;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
@@ -1550,48 +1517,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 "reasoningEffort",
               );
 
-              const currentModelId = yield* applyGrokAcpModelSelection({
-                runtime: ctx.acp,
-                currentModelId: ctx.currentModelId,
-                currentReasoningEffort: ctx.currentReasoningEffort,
-                requestedModelId: requestedTurnModelId,
-                requestedReasoningEffort: requestedTurnReasoningEffort,
-                mapError: (cause) =>
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
-              });
-              // ACP has already committed the model switch at this point. Keep
-              // both the internal comparison state and the public snapshot in
-              // sync even if later prompt preparation (for example, skill
-              // discovery) fails.
-              ctx.currentModelId = currentModelId;
-              if (requestedTurnReasoningEffort !== undefined) {
-                ctx.currentReasoningEffort = normalizeGrokReasoningEffort(
-                  requestedTurnReasoningEffort,
-                );
-              }
-              const displayModel = currentModelId
-                ? resolveGrokAcpBaseModelId(currentModelId)
-                : undefined;
-              if (displayModel) {
-                ctx.session = { ...ctx.session, model: displayModel };
-              }
-
-              const rawText = input.input?.trim();
-              const text =
-                rawText && options?.listSkills && potentialGrokSkillTokens(rawText).length > 0
-                  ? yield* options.listSkills(ctx.session.cwd ?? "").pipe(
-                      Effect.map((skills) => rewriteGrokSkillReferences(rawText, skills)),
-                      Effect.mapError(
-                        (cause) =>
-                          new ProviderAdapterRequestError({
-                            provider: PROVIDER,
-                            method: "skills/list",
-                            detail: "Failed to resolve Grok skill references for this prompt.",
-                            cause,
-                          }),
-                      ),
-                    )
-                  : rawText;
+              const text = input.input?.trim();
               // Grok ingests images only. Generic files reach the agent
               // through the path line ProviderService puts in the prompt.
               const imagePromptParts = yield* Effect.forEach(
@@ -1640,6 +1566,29 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 });
               }
 
+              const currentModelId = yield* applyGrokAcpModelSelection({
+                runtime: ctx.acp,
+                currentModelId: ctx.currentModelId,
+                currentReasoningEffort: ctx.currentReasoningEffort,
+                requestedModelId: requestedTurnModelId,
+                requestedReasoningEffort: requestedTurnReasoningEffort,
+                mapError: (cause) =>
+                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+              });
+              ctx.currentModelId = currentModelId;
+              if (requestedTurnReasoningEffort !== undefined) {
+                ctx.currentReasoningEffort = normalizeGrokReasoningEffort(
+                  requestedTurnReasoningEffort,
+                );
+              }
+              const displayModel = currentModelId
+                ? resolveGrokAcpBaseModelId(currentModelId)
+                : undefined;
+              const runtimeInstructions = buildRuntimeInstructions({
+                harness: "Grok",
+                model: displayModel,
+                reasoningEffort: normalizeGrokReasoningEffort(requestedTurnReasoningEffort),
+              });
               for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
                 yield* Effect.yieldNow;
               }
@@ -1680,6 +1629,14 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   turnId,
                   payload: displayModel ? { model: displayModel } : {},
                 });
+              } else {
+                // Discard the previous epoch only after this replacement is
+                // ready. A failed steer must not skip the live prompt, which
+                // settles without a terminal event when emitTurnCompletion is
+                // false.
+                yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+                yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
+                ctx.discardBeforeEpoch = promptEpoch;
               }
 
               return {
@@ -1687,7 +1644,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 acpSessionId: ctx.acpSessionId,
                 displayModel,
                 promptParts,
+                runtimeInstructions,
                 turnId,
+                promptEpoch,
+                promptLifecycle: ctx.promptLifecycle,
+                steeringTurnId,
               };
             }).pipe(
               Effect.tapCause(() =>
@@ -1714,31 +1675,99 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         const promptFailureMessageRef = yield* Ref.make<string | undefined>(undefined);
 
         return yield* Effect.gen(function* () {
-          const result = yield* prepared.acp
-            .prompt({
-              prompt: prepared.promptParts,
-            })
-            .pipe(
-              Effect.tap((promptResult) =>
-                Effect.all(
-                  [
-                    Ref.set(promptRpcSucceeded, true),
-                    Ref.set(promptResultRef, promptResult),
-                    markPromptResponseReady(input.threadId, prepared.acpSessionId, prepared.turnId),
-                  ],
-                  { discard: true },
-                ),
-              ),
-              Effect.tapError((error) =>
-                Ref.set(
-                  promptFailureMessageRef,
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
-                ).pipe(Effect.andThen(prepared.acp.drainEvents)),
-              ),
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+          const promptStart = yield* prepared.promptLifecycle.withPermit(
+            Effect.gen(function* () {
+              const liveCtx = sessions.get(input.threadId);
+              const interrupted = liveCtx?.interruptedTurnIds.has(prepared.turnId) === true;
+              if (
+                !liveCtx ||
+                liveCtx.acpSessionId !== prepared.acpSessionId ||
+                prepared.promptEpoch < liveCtx.discardBeforeEpoch ||
+                interrupted
+              ) {
+                return { _tag: "Skipped" as const, interrupted };
+              }
+              if (prepared.steeringTurnId !== undefined) {
+                yield* Effect.ignore(
+                  liveCtx.acp.cancel.pipe(
+                    Effect.mapError((error) =>
+                      mapAcpToAdapterError(PROVIDER, input.threadId, "session/cancel", error),
+                    ),
+                  ),
+                );
+              }
+              if (liveCtx.interruptedTurnIds.has(prepared.turnId)) {
+                return { _tag: "Skipped" as const, interrupted: true };
+              }
+              const dispatched = yield* Deferred.make<void>();
+              const fiber = yield* liveCtx.acp
+                .prompt(
+                  {
+                    prompt: [
+                      ...prepared.promptParts,
+                      { type: "text", text: prepared.runtimeInstructions },
+                    ],
+                  },
+                  { dispatched },
+                )
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              // Hold the lifecycle permit until the runtime has registered this
+              // prompt's RPC fiber, so a later steer's session/cancel targets
+              // this prompt. Fall through if the prompt fails before that point.
+              yield* Effect.raceFirst(
+                Deferred.await(dispatched),
+                Fiber.await(fiber).pipe(Effect.asVoid),
+              );
+              return { _tag: "Started" as const, fiber };
+            }),
+          );
+          if (promptStart._tag === "Skipped") {
+            // Settle after releasing promptLifecycle. Holding both locks
+            // deadlocks the next sendTurn, which takes the thread lock first.
+            yield* withThreadLock(
+              input.threadId,
+              settlePromptInFlight(
+                input.threadId,
+                prepared.turnId,
+                prepared.acpSessionId,
+                promptStart.interrupted
+                  ? {
+                      completedStopReason: "cancelled",
+                      settleAllPrompts: true,
+                    }
+                  : { emitTurnCompletion: false },
               ),
             );
+            yield* Ref.set(promptSettled, true);
+            const liveCtx = sessions.get(input.threadId);
+            return {
+              threadId: input.threadId,
+              turnId: prepared.turnId,
+              resumeCursor: liveCtx?.session.resumeCursor,
+            };
+          }
+
+          const result = yield* Fiber.join(promptStart.fiber).pipe(
+            Effect.tap((promptResult) =>
+              Effect.all(
+                [
+                  Ref.set(promptRpcSucceeded, true),
+                  Ref.set(promptResultRef, promptResult),
+                  markPromptResponseReady(input.threadId, prepared.acpSessionId, prepared.turnId),
+                ],
+                { discard: true },
+              ),
+            ),
+            Effect.tapError((error) =>
+              Ref.set(
+                promptFailureMessageRef,
+                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
+              ).pipe(Effect.andThen(prepared.acp.drainEvents)),
+            ),
+            Effect.mapError((error) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+            ),
+          );
 
           return yield* withThreadLock(
             input.threadId,
@@ -2099,6 +2128,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     return {
       provider: PROVIDER,
       capabilities: { sessionModelSwitch: "in-session" },
+      compaction: { type: "slash-command", command: "/compact" },
       startSession,
       sendTurn,
       interruptTurn,
