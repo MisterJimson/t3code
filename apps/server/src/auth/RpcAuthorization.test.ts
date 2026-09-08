@@ -30,12 +30,6 @@ describe("RPC authorization scopes", () => {
     );
   });
 
-  it("authorizes provider skill discovery as an orchestration read", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverListProviderSkills)).toBe(
-      AuthOrchestrationReadScope,
-    );
-  });
-
   it("allows relay status reads without granting relay installation access", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudGetRelayClientStatus)).toBe(
       AuthRelayReadScope,

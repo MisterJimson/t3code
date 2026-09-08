@@ -395,6 +395,68 @@ describe("Cursor skills", () => {
       }),
     ));
 
+  it("discovers skills from the newest Cursor marketplace plugin version", async () =>
+    await runNode(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const userHome = yield* fileSystem.makeTempDirectory({
+          directory: NodeOS.tmpdir(),
+          prefix: "cursor-skills-home-",
+        });
+        const workspace = yield* fileSystem.makeTempDirectory({
+          directory: NodeOS.tmpdir(),
+          prefix: "cursor-skills-workspace-",
+        });
+        const writePluginSkill = Effect.fn("writeCursorPluginSkill")(function* (
+          version: string,
+          name: string,
+        ) {
+          const directory = path.join(
+            userHome,
+            ".cursor",
+            "plugins",
+            "cache",
+            "marketplace",
+            "toolkit",
+            version,
+            "skills",
+            name,
+          );
+          yield* fileSystem.makeDirectory(directory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(directory, "SKILL.md"),
+            `---\ndescription: ${version}\n---\n`,
+          );
+        });
+
+        yield* writePluginSkill("1.0.0", "old-review");
+        yield* writePluginSkill("2.0.0", "review");
+
+        const skills = yield* discoverCursorSkills(workspace, { HOME: userHome });
+        expect(skills).toEqual([
+          {
+            name: "review",
+            description: "2.0.0",
+            path: path.join(
+              userHome,
+              ".cursor",
+              "plugins",
+              "cache",
+              "marketplace",
+              "toolkit",
+              "2.0.0",
+              "skills",
+              "review",
+              "SKILL.md",
+            ),
+            scope: "plugin:toolkit",
+            enabled: true,
+          },
+        ]);
+      }),
+    ));
+
   it("treats a symlinked skill outside the root as a package boundary", async () =>
     await runNode(
       Effect.gen(function* () {

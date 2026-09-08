@@ -42,6 +42,11 @@ interface CursorSkillScanBudget {
   incomplete: boolean;
 }
 
+interface CursorSkillRoot {
+  readonly directory: string;
+  readonly scope: string;
+}
+
 class CursorSkillsProbeError extends Schema.TaggedErrorClass<CursorSkillsProbeError>()(
   "CursorSkillsProbeError",
   {
@@ -128,7 +133,7 @@ function parseSkillFrontmatter(contents: string): CursorSkillFrontmatter | undef
 
 const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (input: {
   readonly directory: string;
-  readonly scope: "user" | "project";
+  readonly scope: string;
   readonly budget: CursorSkillScanBudget;
 }): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -215,6 +220,32 @@ const discoverSkillsInRoot = Effect.fn("discoverCursorSkillsInRoot")(function* (
   return skills;
 });
 
+const discoverPluginSkillRoots = Effect.fn("discoverCursorPluginSkillRoots")(function* (
+  userHome: string,
+): Effect.fn.Return<ReadonlyArray<CursorSkillRoot>, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const readDirectory = (directory: string) =>
+    fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+  const cacheDirectory = path.join(userHome, ".cursor", "plugins", "cache");
+  const roots: CursorSkillRoot[] = [];
+
+  for (const marketplace of (yield* readDirectory(cacheDirectory)).toSorted()) {
+    const marketplaceDirectory = path.join(cacheDirectory, marketplace);
+    for (const plugin of (yield* readDirectory(marketplaceDirectory)).toSorted()) {
+      const pluginDirectory = path.join(marketplaceDirectory, plugin);
+      const version = (yield* readDirectory(pluginDirectory)).toSorted().toReversed()[0];
+      if (!version) continue;
+      roots.push({
+        directory: path.join(pluginDirectory, version, "skills"),
+        scope: `plugin:${plugin}`,
+      });
+    }
+  }
+
+  return roots;
+});
+
 const inspectCursorSkills = Effect.fn("inspectCursorSkills")(function* (
   cwd?: string,
   environment: NodeJS.ProcessEnv = process.env,
@@ -227,7 +258,12 @@ const inspectCursorSkills = Effect.fn("inspectCursorSkills")(function* (
     { directory: path.join(base, ".codex", "skills"), scope },
     { directory: path.join(base, ".claude", "skills"), scope },
   ];
-  const roots = [...(cwd ? rootsBelow(cwd, "project") : []), ...rootsBelow(userHome, "user")];
+  const roots = [
+    ...(cwd ? rootsBelow(cwd, "project") : []),
+    ...rootsBelow(userHome, "user"),
+    ...(yield* discoverPluginSkillRoots(userHome)),
+    { directory: path.join(userHome, ".cursor", "skills-cursor"), scope: "bundled" },
+  ];
 
   const skillsByName = new Map<string, ServerProviderSkill>();
   const budget: CursorSkillScanBudget = {

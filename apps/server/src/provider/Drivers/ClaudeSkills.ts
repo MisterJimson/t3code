@@ -26,7 +26,11 @@ import { parse as parseYamlDocument } from "yaml";
 
 import { expandHomePath } from "../../pathExpansion.ts";
 
-type ClaudeSkillScope = "user" | "project";
+interface ClaudeSkillRoot {
+  readonly directory: string;
+  readonly scope: string;
+  readonly namespace?: string;
+}
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
@@ -295,6 +299,33 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
   return path.join(NodeOS.homedir(), ".claude");
 });
 
+const discoverPluginSkillRoots = Effect.fn("discoverClaudePluginSkillRoots")(function* (
+  configDirPath: string,
+): Effect.fn.Return<ReadonlyArray<ClaudeSkillRoot>, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const readDirectory = (directory: string) =>
+    fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+  const cacheDirectory = path.join(configDirPath, "plugins", "cache");
+  const roots: ClaudeSkillRoot[] = [];
+
+  for (const marketplace of (yield* readDirectory(cacheDirectory)).toSorted()) {
+    const marketplaceDirectory = path.join(cacheDirectory, marketplace);
+    for (const plugin of (yield* readDirectory(marketplaceDirectory)).toSorted()) {
+      const pluginDirectory = path.join(marketplaceDirectory, plugin);
+      const version = (yield* readDirectory(pluginDirectory)).toSorted().toReversed()[0];
+      if (!version) continue;
+      roots.push({
+        directory: path.join(pluginDirectory, version, "skills"),
+        scope: `plugin:${plugin}`,
+        namespace: plugin,
+      });
+    }
+  }
+
+  return roots;
+});
+
 /**
  * Enumerate Claude Code skills from the user config dir and the workspace
  * `.claude/skills`. Discovery is best-effort: unreadable roots and malformed
@@ -315,8 +346,9 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   const configDirPath = yield* resolveClaudeConfigDirPath(config, environment ?? process.env, cwd);
   const skillOverrides = yield* readSkillOverrides(configDirPath, cwd, environment ?? process.env);
 
-  const roots: ReadonlyArray<{ directory: string; scope: ClaudeSkillScope }> = [
+  const roots: ReadonlyArray<ClaudeSkillRoot> = [
     { directory: path.join(configDirPath, "skills"), scope: "user" },
+    ...(yield* discoverPluginSkillRoots(configDirPath)),
     ...(cwd ? [{ directory: path.join(cwd, ".claude", "skills"), scope: "project" as const }] : []),
   ];
 
@@ -349,10 +381,12 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
       // `probe-alias`, and only `skillOverrides["probe-alias"]` switches it
       // off. Keying off the frontmatter name would report a command that does
       // not exist and miss the override that disables it.
-      const name = entry.trim();
-      if (!name) {
+      const baseName = entry.trim();
+      if (!baseName) {
         continue;
       }
+      const name =
+        root.namespace && !baseName.includes(":") ? `${root.namespace}:${baseName}` : baseName;
 
       // First root wins, so a later root never displaces a higher-precedence
       // skill of the same name.

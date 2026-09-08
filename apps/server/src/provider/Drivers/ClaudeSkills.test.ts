@@ -67,6 +67,48 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("discovers namespaced skills from the newest Claude plugin version", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+
+      yield* writeSkill(
+        path.join(configDir, "plugins", "cache", "marketplace", "toolkit", "1.0.0", "skills"),
+        "old-review",
+        "---\ndescription: old\n---\n",
+      );
+      yield* writeSkill(
+        path.join(configDir, "plugins", "cache", "marketplace", "toolkit", "2.0.0", "skills"),
+        "review",
+        "---\ndescription: current\n---\n",
+      );
+
+      const skills = yield* discoverClaudeSkills({ homePath: configDir });
+
+      assert.deepEqual(skills, [
+        {
+          name: "toolkit:review",
+          path: path.join(
+            configDir,
+            "plugins",
+            "cache",
+            "marketplace",
+            "toolkit",
+            "2.0.0",
+            "skills",
+            "review",
+            "SKILL.md",
+          ),
+          enabled: true,
+          scope: "plugin:toolkit",
+          description: "current",
+        },
+      ]);
+    }),
+  );
+
   it.effect("ignores .agents/skills, which Claude Code does not load", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

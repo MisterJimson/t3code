@@ -1,8 +1,6 @@
 import {
   type FilesystemBrowseEntry,
   type KeybindingCommand,
-  type SourceControlCloneRepositoryInput,
-  type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
@@ -141,20 +139,6 @@ export function enumerateCommandPaletteItems(
 
 export type CommandPaletteMode = "root" | "root-browse" | "submenu" | "submenu-browse";
 
-export function getCloneSourceInput(input: {
-  repository: SourceControlRepositoryInfo | null;
-  remoteUrl: string;
-}): Pick<SourceControlCloneRepositoryInput, "provider" | "repository" | "remoteUrl" | "protocol"> {
-  if (input.repository) {
-    return {
-      provider: input.repository.provider,
-      repository: input.repository.nameWithOwner,
-      protocol: "auto",
-    };
-  }
-
-  return { remoteUrl: input.remoteUrl };
-}
 export function buildProjectActionItems(input: {
   projects: ReadonlyArray<Project>;
   valuePrefix: string;
